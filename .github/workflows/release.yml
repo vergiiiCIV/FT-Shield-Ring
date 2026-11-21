@@ -1,0 +1,48 @@
+name: Publication CurseForge
+
+# Se lance quand le numéro de version change dans FT-Shield-Ring.toc (branche main).
+# Le workflow crée l'étiquette vX.Y.Z puis envoie le zip sur CurseForge.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "FT-Shield-Ring.toc"
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      CF_API_KEY: ${{ secrets.CF_API_KEY }}
+      GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Lire la version et créer l'étiquette
+        id: tag
+        run: |
+          VERSION=$(grep -m1 '^## Version:' FT-Shield-Ring.toc | sed 's/^## Version: *//' | tr -d '\r ')
+          TAG="v$VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "L'étiquette $TAG existe déjà : rien à publier."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "FT - Shield Ring $VERSION"
+            git push origin "$TAG"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Envoi sur CurseForge
+        if: steps.tag.outputs.skip == 'false'
+        # Lancé depuis main : on indique au packager que l'étiquette vient d'être créée.
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/BigWigsMods/packager/v2/release.sh -o /tmp/release.sh
+          GITHUB_EVENT_NAME=workflow_dispatch bash /tmp/release.sh

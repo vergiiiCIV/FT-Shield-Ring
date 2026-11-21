@@ -1,0 +1,6 @@
+package-as: FT-Shield-Ring
+
+ignore:
+  - .github
+  - .pkgmeta
+  - .gitignore
