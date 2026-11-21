@@ -1,0 +1,20 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+  <!-- Tiret rouge « Âme affaiblie » d'un membre du groupe. Le jeu affiche ce bouton lui-même
+       (AuraContainer) quand le joueur porte l'aura, même en combat : l'addon ne lit rien. -->
+  <ScopedModifier useForbiddenObjectTable="true">
+    <AuraButton name="FTShieldRingWSDashTemplate" inherits="CustomAuraButtonTemplate" virtual="true">
+      <Size x="24" y="24"/>
+      <Layers>
+        <Layer level="ARTWORK">
+          <Texture parentKey="Dash" file="Interface\Buttons\WHITE8x8">
+            <Size x="22" y="4"/>
+            <Anchors>
+              <Anchor point="CENTER"/>
+            </Anchors>
+            <Color r="0.75" g="0.29" b="0.21" a="1"/>
+          </Texture>
+        </Layer>
+      </Layers>
+    </AuraButton>
+  </ScopedModifier>
+</Ui>

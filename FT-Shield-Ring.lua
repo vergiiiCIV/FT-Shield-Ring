@@ -575,6 +575,453 @@ local function say(msg)
     print("|cffffe86eFT - Shield Ring|r : " .. msg)
 end
 
+
+---------------------------------------------------------------------------
+-- Alerte Mot de l'ombre : Mort
+-- La vie de la cible est cachée aux addons en combat. Le jeu accepte pourtant de la mettre dans
+-- une barre : un voile sombre (barre) recouvre l'icône tant que la vie de la cible est au-dessus
+-- des dégâts minimum du sort, et disparaît quand le sort la tuera. Les dégâts sont lus hors combat.
+---------------------------------------------------------------------------
+
+local SWD_ID = 1309595 -- numéro dans Forever (32379 ailleurs)
+local SWD_NAMES = { "Mot de l'ombre : Mort", "Mot de l’ombre : Mort", "Shadow Word: Death" }
+local swd = { id = nil, dmg = nil, icon = nil }
+
+local alert = CreateFrame("Frame", "FTShieldRingAlert", UIParent)
+alert:SetSize(30, 30)
+alert:SetFrameStrata("MEDIUM")
+alert:Hide()
+local glow = alert:CreateTexture(nil, "BACKGROUND")
+glow:SetTexture(MEDIA .. "Glow")
+glow:SetPoint("CENTER")
+glow:SetSize(78, 78)
+glow:SetVertexColor(0.7, 0.4, 1, 0)
+local aIcon = alert:CreateTexture(nil, "ARTWORK")
+aIcon:SetAllPoints()
+aIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+local aEdge = alert:CreateTexture(nil, "BORDER")
+aEdge:SetPoint("TOPLEFT", -2, 2)
+aEdge:SetPoint("BOTTOMRIGHT", 2, -2)
+aEdge:SetColorTexture(0.78, 0.56, 1, 1)
+local cover = CreateFrame("StatusBar", nil, alert)
+cover:SetAllPoints(aIcon)
+cover:SetStatusBarTexture("Interface\\Buttons\\WHITE8x8")
+cover:SetStatusBarColor(0, 0, 0, 0.78)
+cover:SetOrientation("VERTICAL")
+cover:SetFrameLevel(alert:GetFrameLevel() + 2)
+
+local curve, curveFor, curveOk = nil, nil, true
+
+local function normName(n)
+    -- apostrophe typographique et espace insécable (Forever : « l’ombre », « Mort » précédé de \194\160)
+    return (n:gsub("\226\128\153", "'"):gsub("\194\160", " "):gsub("%s+", " "):lower())
+end
+
+-- Cherche Mot de l'ombre : Mort dans le grimoire (le numéro du sort diffère dans Forever).
+local function swdKnown()
+    local wanted = {}
+    for _, n in ipairs(SWD_NAMES) do
+        wanted[normName(n)] = true
+    end
+    local SB = C_SpellBook
+    if SB and SB.GetNumSpellBookSkillLines and Enum and Enum.SpellBookSpellBank then
+        local bank = Enum.SpellBookSpellBank.Player
+        local bestId, bestIcon, bestRank = nil, nil, -1
+        for line = 1, SB.GetNumSpellBookSkillLines() do
+            local info = SB.GetSpellBookSkillLineInfo(line)
+            if info then
+                local first = (info.itemIndexOffset or 0) + 1
+                for i = first, first + (info.numSpellBookItems or 0) - 1 do
+                    local ok, it = pcall(SB.GetSpellBookItemInfo, i, bank)
+                    local nm, sub = SB.GetSpellBookItemName(i, bank)
+                    nm = nm or (ok and it and it.name)
+                    if ok and it and type(nm) == "string" and not isSecret(nm) and wanted[normName(nm)] then
+                        local r = sub and tonumber(tostring(sub):match("%d+")) or 0
+                        if r > bestRank then
+                            bestRank, bestId, bestIcon = r, it.actionID or it.spellID, it.iconID
+                        end
+                    end
+                end
+            end
+        end
+        if bestId then
+            return bestId, bestIcon
+        end
+    end
+    if GetNumSpellTabs and GetSpellBookItemName then
+        local bestId, bestRank = nil, -1
+        for tab = 1, GetNumSpellTabs() do
+            local _, _, offset, num = GetSpellTabInfo(tab)
+            for i = (offset or 0) + 1, (offset or 0) + (num or 0) do
+                local nm, sub = GetSpellBookItemName(i, "spell")
+                if type(nm) == "string" and wanted[normName(nm)] then
+                    local _, id = GetSpellBookItemInfo(i, "spell")
+                    local r = sub and tonumber(tostring(sub):match("%d+")) or 0
+                    if id and r > bestRank then
+                        bestRank, bestId = r, id
+                    end
+                end
+            end
+        end
+        if bestId then
+            return bestId
+        end
+    end
+    for _, n in ipairs(SWD_NAMES) do
+        if C_Spell and C_Spell.GetSpellInfo then
+            local ok, info = pcall(C_Spell.GetSpellInfo, n)
+            if ok and info and info.spellID and (not IsPlayerSpell or IsPlayerSpell(info.spellID)) then
+                return info.spellID, info.iconID
+            end
+        end
+    end
+    for _, id in ipairs({ SWD_ID, 32379 }) do
+        if IsPlayerSpell and IsPlayerSpell(id) then
+            return id
+        end
+    end
+end
+
+-- Hors combat : sort connu ? dégâts minimum lus dans sa description.
+local function readSwd()
+    if InCombatLockdown() then
+        return
+    end
+    local id, icon = swdKnown()
+    swd.id, swd.icon = id, icon
+    swd.dmg = nil
+    if id and C_Spell and C_Spell.GetSpellDescription then
+        local ok, desc = pcall(C_Spell.GetSpellDescription, id)
+        if ok and type(desc) == "string" and not isSecret(desc) then
+            local n = desc:gsub("[%s\194\160\226\128\175]", ""):match("(%d+)")
+            swd.dmg = tonumber(n)
+        end
+    end
+    if not swd.icon and C_Spell and C_Spell.GetSpellTexture and id then
+        swd.icon = C_Spell.GetSpellTexture(id)
+    end
+end
+
+local function threshold()
+    if db and (db.swdTest or 0) > 0 then
+        return db.swdTest
+    end
+    return swd.dmg
+end
+
+local function placeAlert()
+    alert:ClearAllPoints()
+    alert:SetPoint("BOTTOM", root, "CENTER", 0, radius() + (db and db.dotSize or 7) + 16)
+end
+
+local function setGlow(thr)
+    if not curveOk or not (C_CurveUtil and C_CurveUtil.CreateColorCurve and CreateColor) then
+        glow:Hide()
+        return
+    end
+    local ok = pcall(function()
+        if curveFor ~= thr then
+            curve = C_CurveUtil.CreateColorCurve()
+            if curve.SetType and Enum and Enum.LuaCurveType then
+                curve:SetType(Enum.LuaCurveType.Step)
+            end
+            curve:AddPoint(0, CreateColor(0.7, 0.4, 1, 1))
+            curve:AddPoint(thr, CreateColor(0.7, 0.4, 1, 0))
+            curveFor = thr
+        end
+        local c = curve:Evaluate(UnitHealth("target"))
+        glow:SetVertexColor(c:GetRGBA())
+    end)
+    if ok then
+        glow:Show()
+    else
+        curveOk = false
+        glow:Hide()
+    end
+end
+
+local function alertActive()
+    if not db or db.swdAlert == false then
+        return false
+    end
+    local thr = threshold()
+    if not thr or thr <= 1 then
+        return false
+    end
+    if not (db.swdTest and db.swdTest > 0) and not swd.id then
+        return false
+    end
+    if not InCombatLockdown() or not UnitExists("target") or not UnitCanAttack("player", "target") then
+        return false
+    end
+    local ok, dead = pcall(UnitIsDeadOrGhost, "target")
+    if ok and dead == true then
+        return false
+    end
+    return true, thr
+end
+
+local aTick = 0
+local function updateAlert()
+    local on, thr = alertActive()
+    if not on then
+        alert:Hide()
+        return
+    end
+    aIcon:SetTexture(swd.icon or "Interface\\Icons\\Spell_Shadow_DemonicFortitude")
+    cover:SetMinMaxValues(thr - 1, thr)
+    pcall(cover.SetValue, cover, UnitHealth("target"))
+    setGlow(thr)
+    alert:Show()
+end
+
+
+local aEv = CreateFrame("Frame")
+for _, e in ipairs({ "PLAYER_ENTERING_WORLD", "PLAYER_REGEN_ENABLED", "PLAYER_REGEN_DISABLED", "PLAYER_TARGET_CHANGED", "SPELLS_CHANGED", "UNIT_INVENTORY_CHANGED" }) do
+    pcall(aEv.RegisterEvent, aEv, e)
+end
+aEv:SetScript("OnEvent", function(_, e)
+    if not db then
+        return
+    end
+    if e ~= "PLAYER_REGEN_DISABLED" and e ~= "PLAYER_TARGET_CHANGED" then
+        readSwd()
+    end
+    placeAlert()
+    updateAlert()
+end)
+
+
+---------------------------------------------------------------------------
+-- Âme affaiblie du groupe : 4 tirets en demi-cercle sous l'anneau, dans l'ordre des cadres HealKit.
+-- Doré = bouclier possible. Rouge = Âme affaiblie (n'importe quel prêtre) : c'est le jeu qui
+-- affiche le tiret rouge (AuraContainer), même en combat.
+---------------------------------------------------------------------------
+
+local WS_IDS = { 6788 }
+local PARTY_SLOTS = 4
+local partyHolder = CreateFrame("Frame", "FTShieldRingParty", UIParent)
+partyHolder:SetSize(1, 1)
+partyHolder:SetFrameStrata("MEDIUM")
+partyHolder:Hide()
+local slots = {}
+local slotUnits = {}
+local partyDirty = true
+local FlowDir = AnchorUtil and AnchorUtil.FlowDirection
+
+local ROLE_RANK = { TANK = 1, HEALER = 2, DAMAGER = 3 }
+local function roleRank(unit)
+    local ok, r = pcall(UnitGroupRolesAssigned, unit)
+    return (ok and ROLE_RANK[r or ""]) or 3
+end
+
+-- Membres suivis, dans l'ordre des cadres HealKit (tri par rôle si HealKit trie par rôle).
+local function trackedUnits()
+    local sortBy = type(HealKitDB) == "table" and HealKitDB.sortBy or "role"
+    local list = {}
+    if IsInRaid() then
+        for i = 1, 40 do
+            local u = "raid" .. i
+            if UnitExists(u) and not UnitIsUnit(u, "player") and roleRank(u) == 1 then
+                local _, _, sub = GetRaidRosterInfo(i)
+                list[#list + 1] = { u = u, r = sub or 9, i = i }
+            end
+        end
+        table.sort(list, function(a, b)
+            if a.r ~= b.r then
+                return a.r < b.r
+            end
+            return a.i < b.i
+        end)
+        local out = {}
+        for k = 1, math.min(3, #list) do
+            out[#out + 1] = list[k].u
+        end
+        if UnitExists("focus") and not UnitIsUnit("focus", "player") then
+            local dup = false
+            for _, u in ipairs(out) do
+                if UnitIsUnit(u, "focus") then
+                    dup = true
+                end
+            end
+            if not dup then
+                out[#out + 1] = "focus"
+            end
+        end
+        return out
+    end
+    for i = 1, 4 do
+        local u = "party" .. i
+        if UnitExists(u) then
+            list[#list + 1] = { u = u, r = (sortBy == "role") and roleRank(u) or 1, i = i }
+        end
+    end
+    table.sort(list, function(a, b)
+        if a.r ~= b.r then
+            return a.r < b.r
+        end
+        return a.i < b.i
+    end)
+    local out = {}
+    for _, e in ipairs(list) do
+        out[#out + 1] = e.u
+    end
+    return out
+end
+
+local function slotGeometry(i)
+    local wr = radius() + (db and db.dotSize or 7) + 2
+    local R = wr + 12
+    local ang = math.rad(180 + (i - 0.5) * 180 / PARTY_SLOTS)
+    local len = math.max(10, R * math.rad(30))
+    return math.cos(ang) * R, math.sin(ang) * R, ang + math.pi / 2, len
+end
+
+local function makeSlot(i)
+    local s = {}
+    s.base = partyHolder:CreateTexture(nil, "ARTWORK")
+    s.base:SetTexture("Interface\\Buttons\\WHITE8x8")
+    s.base:SetVertexColor(0.91, 0.78, 0.42, 0.9)
+    if FlowDir then
+        local ok, c = pcall(CreateFrame, "AuraContainer", nil, partyHolder, "CustomAuraContainerTemplate")
+        if ok and c then
+            local done = pcall(function()
+                c:SetSize(24, 24)
+                c:SetFrameLevel(partyHolder:GetFrameLevel() + 5)
+                c:SetFlowLayoutAnchorPoint("TOPLEFT")
+                c:SetFlowLayoutGrowthDirection(FlowDir.Right, FlowDir.Down)
+                c:EnableMouse(false)
+                if c.SetEditModePreviewEnabled then
+                    c:SetEditModePreviewEnabled(false)
+                end
+                c:AddAuraGroup("ws", "HARMFUL", {
+                    maxFrameCount = 1,
+                    templateNames = { "FTShieldRingWSDashTemplate" },
+                    initializeFrame = function(btn)
+                        local _, _, rot, len = slotGeometry(i)
+                        btn:SetSize(24, 24)
+                        if btn.Dash then
+                            btn.Dash:SetSize(len, 4)
+                            btn.Dash:SetRotation(rot)
+                        end
+                    end,
+                    candidateFilters = { includeSpellIDs = WS_IDS },
+                    layout = { elementSpacing = 0 },
+                })
+                c:SetUnit("none")
+            end)
+            if done then
+                s.cont = c
+            else
+                c:Hide()
+            end
+        end
+    end
+    slots[i] = s
+    return s
+end
+
+local function placeParty()
+    partyHolder:ClearAllPoints()
+    partyHolder:SetPoint("CENTER", root, "CENTER")
+    for i = 1, PARTY_SLOTS do
+        local s = slots[i] or makeSlot(i)
+        local x, y, rot, len = slotGeometry(i)
+        s.base:ClearAllPoints()
+        s.base:SetPoint("CENTER", partyHolder, "CENTER", x, y)
+        s.base:SetSize(len, 4)
+        s.base:SetRotation(rot)
+        if s.cont then
+            pcall(s.cont.ClearAllPoints, s.cont)
+            pcall(s.cont.SetPoint, s.cont, "TOPLEFT", partyHolder, "CENTER", x - 12, y + 12)
+        end
+    end
+end
+
+local function assignParty()
+    if InCombatLockdown() then
+        partyDirty = true
+        return
+    end
+    partyDirty = false
+    local units = trackedUnits()
+    for i = 1, PARTY_SLOTS do
+        local s = slots[i] or makeSlot(i)
+        local u = units[i]
+        slotUnits[i] = u
+        s.base:SetShown(u ~= nil)
+        if s.cont then
+            pcall(s.cont.SetUnit, s.cont, u or "none")
+            pcall(s.cont.SetShown, s.cont, u ~= nil)
+        end
+    end
+end
+
+local function partyVisible()
+    if not db or db.partyWS == false then
+        return false
+    end
+    if state.test then
+        return true -- aperçu (/vsr test) : les 4 tirets, même seul
+    end
+    if not IsInGroup() then
+        return false
+    end
+    return not db.locked or not db.combatOnly or InCombatLockdown()
+end
+
+local function updateParty()
+    if partyVisible() then
+        if state.test and not IsInGroup() then
+            for i = 1, PARTY_SLOTS do
+                if slots[i] then
+                    slots[i].base:Show()
+                end
+            end
+        end
+        partyHolder:Show()
+    else
+        partyHolder:Hide()
+    end
+end
+
+-- Mise à jour régulière de l'alerte et des tirets (ce cadre reste toujours actif).
+local lastGeo
+local ticker = CreateFrame("Frame")
+ticker:SetScript("OnUpdate", function(_, e)
+    aTick = aTick + e
+    if aTick >= 0.1 then
+        aTick = 0
+        if db then
+            local key = radius() .. ":" .. (db.dotSize or 7)
+            if key ~= lastGeo then
+                lastGeo = key
+                placeParty()
+                placeAlert()
+            end
+            updateAlert()
+            updateParty()
+        end
+    end
+end)
+
+local pEv = CreateFrame("Frame")
+for _, e in ipairs({ "PLAYER_ENTERING_WORLD", "GROUP_ROSTER_UPDATE", "PLAYER_ROLES_ASSIGNED", "PLAYER_FOCUS_CHANGED",
+    "PLAYER_REGEN_ENABLED", "PLAYER_REGEN_DISABLED" }) do
+    pcall(pEv.RegisterEvent, pEv, e)
+end
+pEv:SetScript("OnEvent", function(_, e)
+    if not db then
+        return
+    end
+    placeParty()
+    if e ~= "PLAYER_REGEN_DISABLED" or partyDirty then
+        assignParty()
+    end
+    updateParty()
+end)
+
+local testBar
 SLASH_VERGISHIELDRING1 = "/vsr"
 SlashCmdList.VERGISHIELDRING = function(msg)
     local cmd, arg = (msg or ""):lower():match("^(%S*)%s*(.-)$")
@@ -592,6 +1039,7 @@ SlashCmdList.VERGISHIELDRING = function(msg)
             state.active = false
             refresh()
             setLocked(db.locked)
+            assignParty()
             say("aperçu arrêté.")
         end
     elseif cmd == "deplacer" or cmd == "unlock" then
@@ -635,6 +1083,135 @@ SlashCmdList.VERGISHIELDRING = function(msg)
         db.showWS = not db.showWS
         updateWS()
         say("Âme affaiblie " .. (db.showWS and "affichée." or "masquée."))
+    elseif cmd == "testvie" then
+        -- Test : la vie de la cible et la puissance des sorts sont-elles lisibles (surtout en combat) ?
+        local function read(fn, ...)
+            if not fn then
+                return "absente"
+            end
+            local ok, v = pcall(fn, ...)
+            if not ok then
+                return "erreur"
+            elseif v == nil then
+                return "vide"
+            elseif isSecret(v) then
+                return "CACHÉE"
+            end
+            return tostring(v)
+        end
+        local fight = InCombatLockdown() and "oui" or "non"
+        local enemy = UnitExists("target") and UnitCanAttack("player", "target")
+        local hp = read(UnitHealth, "target")
+        local hpMax = read(UnitHealthMax, "target")
+        local sp = read(GetSpellBonusDamage, 6)
+        say("test vie : combat " .. fight .. ", cible ennemie " .. (enemy and "oui" or "non"))
+        print("  vie de la cible : " .. hp .. " / " .. hpMax)
+        print("  puissance des sorts d'Ombre : " .. sp)
+        -- Mot de l'ombre : Mort : rang connu et dégâts indiqués dans sa description
+        local swdName = C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(32379)
+        local swdId, desc = nil, nil
+        if swdName and C_Spell.GetSpellInfo then
+            local ok, info = pcall(C_Spell.GetSpellInfo, swdName)
+            swdId = ok and info and info.spellID
+        end
+        if swdId and C_Spell.GetSpellDescription then
+            local ok, d = pcall(C_Spell.GetSpellDescription, swdId)
+            desc = ok and d or nil
+            if desc and isSecret(desc) then
+                desc = "CACHÉE"
+            end
+        end
+        print("  Mot de l'ombre : Mort : " .. (swdId and ("connu (sort " .. swdId .. ")") or "non trouvé"))
+        if desc then
+            print("  description : " .. tostring(desc):gsub("\n", " "))
+        end
+        -- Barre cachée : le jeu accepte-t-il d'y mettre la vie (cachée) de la cible ?
+        local barOk = "pas de cible"
+        if UnitExists("target") then
+            testBar = testBar or CreateFrame("StatusBar", nil, UIParent)
+            local bar = testBar
+            bar:Hide()
+            bar:SetMinMaxValues(0, 1000)
+            local ok = pcall(bar.SetValue, bar, UnitHealth("target"))
+            barOk = ok and "OUI" or "non"
+        end
+        print("  barre de vie cachée acceptée : " .. barOk)
+        print("  outils du jeu : UnitHealthPercent " .. (UnitHealthPercent and "oui" or "non")
+            .. ", courbes " .. ((C_CurveUtil and "oui") or "non"))
+        if not enemy then
+            print("  |cffffd24aCible un monstre et relance le test en combat.|r")
+        elseif fight == "oui" then
+            local ok = hp ~= "CACHÉE" and hp ~= "erreur" and hp ~= "vide" and hp ~= "absente"
+            print(ok and "  |cff6fd06fLisible en combat : l'alerte Mot de l'ombre : Mort est possible.|r"
+                or "  |cffff5555Cachée en combat : l'alerte ne pourra pas calculer si la cible meurt.|r")
+        end
+        db.testvie = db.testvie or {}
+        db.testvie[#db.testvie + 1] = { t = time(), combat = fight, enemy = enemy and true or false, hp = hp, hpMax = hpMax, sp = sp, swd = swdId, desc = desc and tostring(desc) or nil, bar = barOk, pct = UnitHealthPercent and true or false, curve = C_CurveUtil and true or false }
+        while #db.testvie > 10 do
+            table.remove(db.testvie, 1)
+        end
+    elseif cmd == "seuil" then
+        local n = tonumber(arg)
+        if n and n >= 0 then
+            db.swdTest = n
+            say(n > 0 and ("alerte en mode test : s'allume quand la cible passe sous " .. n .. " PV (en combat). /vsr seuil 0 pour arrêter.")
+                or "mode test de l'alerte arrêté.")
+        else
+            say("usage : /vsr seuil <PV> (0 = arrêter le test)")
+        end
+    elseif cmd == "mort" then
+        db.swdAlert = db.swdAlert == false
+        readSwd()
+        say("alerte Mot de l'ombre : Mort " .. (db.swdAlert ~= false and "activée" or "désactivée")
+            .. (swd.id and (swd.dmg and (" (dégâts minimum lus : " .. swd.dmg .. ")") or " (dégâts non lus)") or " (sort pas encore appris)") .. ".")
+    elseif cmd == "debugmort" then
+        local SB = C_SpellBook
+        say("diagnostic grimoire : C_SpellBook " .. (SB and "oui" or "non") .. ", ancienne API " .. (GetNumSpellTabs and "oui" or "non"))
+        local found = 0
+        local function show(src, i, nm, sub, id)
+            local low = type(nm) == "string" and normName(nm) or ""
+            if low:find("mort", 1, true) or low:find("death", 1, true) then
+                found = found + 1
+                local bytes = {}
+                for k = 1, math.min(#nm, 40) do
+                    bytes[#bytes + 1] = nm:byte(k)
+                end
+                print(string.format("  [%s %d] %s | %s | sort %s | octets %s", src, i, nm, tostring(sub), tostring(id), table.concat(bytes, ",")))
+            end
+        end
+        if SB and SB.GetNumSpellBookSkillLines and Enum and Enum.SpellBookSpellBank then
+            local bank = Enum.SpellBookSpellBank.Player
+            local lines = SB.GetNumSpellBookSkillLines()
+            print("  lignes du grimoire : " .. tostring(lines))
+            for line = 1, lines do
+                local info = SB.GetSpellBookSkillLineInfo(line)
+                if info then
+                    local first = (info.itemIndexOffset or 0) + 1
+                    for i = first, first + (info.numSpellBookItems or 0) - 1 do
+                        local ok, it = pcall(SB.GetSpellBookItemInfo, i, bank)
+                        local nm, sub = SB.GetSpellBookItemName(i, bank)
+                        show("SB", i, nm or (ok and it and it.name), sub, ok and it and (it.actionID or it.spellID))
+                    end
+                end
+            end
+        end
+        if GetNumSpellTabs and GetSpellBookItemName then
+            for tab = 1, GetNumSpellTabs() do
+                local _, _, offset, num = GetSpellTabInfo(tab)
+                for i = (offset or 0) + 1, (offset or 0) + (num or 0) do
+                    local nm, sub = GetSpellBookItemName(i, "spell")
+                    local _, id = GetSpellBookItemInfo(i, "spell")
+                    show("ancien", i, nm, sub, id)
+                end
+            end
+        end
+        print("  sorts trouvés contenant « mort » : " .. found)
+    elseif cmd == "groupe" then
+        db.partyWS = db.partyWS == false
+        placeParty()
+        assignParty()
+        updateParty()
+        say("tirets Âme affaiblie du groupe " .. (db.partyWS and "affichés." or "masqués."))
     elseif cmd == "reset" then
         for k, v in pairs(DEFAULTS) do
             db[k] = v
@@ -655,6 +1232,10 @@ SlashCmdList.VERGISHIELDRING = function(msg)
         print("  /vsr texte — afficher/masquer le nombre")
         print("  /vsr temps — afficher/masquer le temps restant du bouclier")
         print("  /vsr ame — afficher/masquer Âme affaiblie")
+        print("  /vsr groupe — tirets Âme affaiblie du groupe (oui/non)")
+        print("  /vsr mort — alerte Mot de l'ombre : Mort (oui/non)")
+        print("  /vsr seuil <PV> — tester l'alerte avec un seuil fixe (0 = arrêter)")
+        print("  /vsr testvie — test : vie de la cible lisible en combat ?")
         print("  /vsr reset — réglages par défaut")
     end
 end
