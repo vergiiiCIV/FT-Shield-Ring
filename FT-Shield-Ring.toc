@@ -3,7 +3,7 @@
 ## Notes: Anneau de Mot de pouvoir : Bouclier autour du cercle de vie (AishCore).
 ## Notes-frFR: Anneau de Mot de pouvoir : Bouclier autour du cercle de vie (AishCore).
 ## Author: John
-## Version: 1.0.5
+## Version: 1.0.6
 ## IconTexture: Interface\Icons\Spell_Holy_PowerWordShield
 ## LoadConditions: [class:PRIEST]
 ## OptionalDeps: AishCore
